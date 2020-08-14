@@ -6,12 +6,12 @@
 // by their type:
 //
 //     type (
-//         Position float32
-//         Velocity float32
+//         Position int
+//         Velocity int
 //     )
 //
 //     func Movement(pos Position, vel Velocity) Position {
-//         return Position(float32(pos) + float32(vel))
+//         return Position(int(pos) + int(vel))
 //     }
 //
 // The Position and Velocity types represent components, and the Movement
@@ -20,18 +20,7 @@
 // overriden with the return value, effectively updating the object's Position
 // component on each iteration.
 //
-// For the most part, system method signatures will be defined by which components they operate on, and which ones they update. However, there are two special constructs that can be used as well:
-//
-//
-//     // Systems can return an error as their final return value which are
-//     // handled by the world's error handler.
-//     func Movement(pos Position, vel Velocity) (Position, error) {
-//         // ...
-//     }
-
-//     func Movement(now time.Time, pos Position, vel Velocity) Position {
-//         // ...
-//     }
+// See the examples and tests for additional usage patterns.
 package ecs
 
 import (
@@ -40,6 +29,7 @@ import (
 	"log"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,13 +41,16 @@ var (
 	timeType          = reflect.TypeOf(time.Time{})
 	entityType        = reflect.TypeOf(Entity(0))
 	intType           = reflect.TypeOf(int(0))
+	worldType         = reflect.TypeOf(&World{})
 )
 
 type World struct {
 	// OnError is a callback that will be invoked when a system returns an error as its final argument.
 	OnError func(name string, args []interface{}, err error)
 
-	objects []*Object
+	objects   []*Object
+	objectsMu sync.RWMutex
+
 	systems []System
 }
 
@@ -69,17 +62,32 @@ func NewWorld() *World {
 }
 
 func (w *World) AddObject(ob *Object) Entity {
+	w.objectsMu.Lock()
+	defer w.objectsMu.Unlock()
 	w.objects = append(w.objects, ob)
 	return ob.entity
 }
 
 func (w *World) GetObject(entity Entity) *Object {
+	w.objectsMu.RLock()
+	defer w.objectsMu.RUnlock()
 	for _, ob := range w.objects {
 		if ob.entity == entity {
 			return ob
 		}
 	}
 	return nil
+}
+
+func (w *World) RemoveObject(entity Entity) {
+	w.objectsMu.Lock()
+	defer w.objectsMu.Unlock()
+	for i, ob := range w.objects {
+		if ob.entity == entity {
+			w.objects = append(w.objects[:i], w.objects[i+1:]...)
+			return
+		}
+	}
 }
 
 func (w *World) AddSystem(s System) {
@@ -126,6 +134,9 @@ func (w *World) makeObjectIter(t reflect.Type) (reflect.Value, error) {
 	}
 
 	return reflect.MakeFunc(t, func(args []reflect.Value) (results []reflect.Value) {
+		w.objectsMu.RLock()
+		defer w.objectsMu.RUnlock()
+
 		results = make([]reflect.Value, t.NumOut())
 
 		start := 0
@@ -142,7 +153,7 @@ func (w *World) makeObjectIter(t reflect.Type) (reflect.Value, error) {
 				} else if ot == entityType {
 					results[out] = reflect.ValueOf(ob.entity)
 				} else {
-					c := ob.getComponent(ot)
+					c := ob.getComponentValue(ot)
 					if !c.IsValid() {
 						continue ol
 					}
@@ -181,16 +192,39 @@ func NewObject(cs ...interface{}) *Object {
 	}
 }
 
-func (o *Object) Entity() Entity {
-	return o.entity
+func (ob *Object) Entity() Entity {
+	return ob.entity
 }
 
-func (o *Object) Components() []interface{} {
-	return o.components
+func (ob *Object) Components() []interface{} {
+	return ob.components
 }
 
-func (o *Object) getComponent(t reflect.Type) reflect.Value {
-	for _, c := range o.components {
+func (ob *Object) Component(component interface{}) interface{} {
+	t := reflect.TypeOf(component)
+	for _, c := range ob.components {
+		if reflect.TypeOf(c) == t {
+			return c
+		}
+	}
+	return nil
+}
+
+func (ob *Object) AddComponent(component interface{}) {
+	ob.components = append(ob.components, component)
+}
+
+func (ob *Object) RemoveComponent(component interface{}) {
+	t := reflect.TypeOf(component)
+	for i, c := range ob.components {
+		if reflect.TypeOf(c) == t {
+			ob.components = append(ob.components[:i], ob.components[i+1:]...)
+		}
+	}
+}
+
+func (ob *Object) getComponentValue(t reflect.Type) reflect.Value {
+	for _, c := range ob.components {
 		v := reflect.ValueOf(c)
 		if v.Type() == t {
 			return v
@@ -239,6 +273,16 @@ ol:
 	for _, ob := range w.objects {
 	tl:
 		for i, t := range argTypes {
+			if t == worldType {
+				argValues[i] = reflect.ValueOf(w)
+				continue tl
+			}
+
+			if t == entityType {
+				argValues[i] = reflect.ValueOf(ob.entity)
+				continue tl
+			}
+
 			if t == timeType {
 				argValues[i] = reflect.ValueOf(now)
 				continue tl
@@ -278,6 +322,9 @@ ol:
 				name := s.Name
 				if name == "" {
 					name = runtime.FuncForPC(f.Pointer()).Name()
+					if dot := strings.LastIndex(name, "."); dot > -1 {
+						name = name[dot+1:]
+					}
 				}
 				args := make([]interface{}, len(argValues))
 				for i, v := range argValues {

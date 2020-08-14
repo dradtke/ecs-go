@@ -11,20 +11,9 @@ import (
 )
 
 type (
-	Player   struct{}
-	Target   struct{}
-	Position int
-	Velocity int
+	Player struct{}
+	Target struct{}
 )
-
-func GetPosition(ob *ecs.Object) Position {
-	for _, c := range ob.Components() {
-		if pos, ok := c.(Position); ok {
-			return pos
-		}
-	}
-	panic("object has no position")
-}
 
 // like a time.Ticker channel, but only ticks n times and then closes
 func MaxTicker(d time.Duration, n int) <-chan time.Time {
@@ -53,7 +42,7 @@ func TestMovement(t *testing.T) {
 		world.AddObject(player)
 
 		world.Run()
-		if p := GetPosition(player); p != Position(3) {
+		if p := player.Component(Position(0)).(Position); p != Position(3) {
 			t.Errorf("bad position: want 3, got %v", p)
 		}
 	})
@@ -69,7 +58,7 @@ func TestMovement(t *testing.T) {
 		world.AddObject(player)
 
 		world.Run()
-		if got, want := GetPosition(player), 7; got != Position(want) {
+		if got, want := player.Component(Position(0)).(Position), 7; got != Position(want) {
 			t.Errorf("bad position: got %v, want %v", got, want)
 		}
 	})
@@ -143,7 +132,8 @@ func TestError(t *testing.T) {
 
 func TestMoveTowardsTarget(t *testing.T) {
 	world := ecs.NewWorld()
-	playerEntity := world.AddObject(ecs.NewObject(Player{}, Position(1)))
+	player := ecs.NewObject(Player{}, Position(1))
+	world.AddObject(player)
 	world.AddObject(ecs.NewObject(Target{}, Position(5)))
 
 	movement := func(_ Player, pos Position, targetIter func() (Target, Position, bool)) Position {
@@ -167,7 +157,7 @@ func TestMoveTowardsTarget(t *testing.T) {
 
 	world.RunContext(ctx)
 
-	if got, want := GetPosition(world.GetObject(playerEntity)), Position(5); got != want {
+	if got, want := player.Component(Position(0)).(Position), Position(5); got != want {
 		t.Errorf("player didn't move towards target: got %v, want %v", got, want)
 	}
 }
@@ -203,5 +193,61 @@ func TestQueryAll(t *testing.T) {
 
 	if !findTargetsInvoked {
 		t.Error("findTargets not invoked")
+	}
+}
+
+func TestAddAndRemoveComponents(t *testing.T) {
+	player := ecs.NewObject(Position(1))
+
+	if player.Component(Velocity(0)) != nil {
+		t.Fatal("player should not have velocity")
+	}
+
+	player.AddComponent(Velocity(2))
+	if player.Component(Velocity(0)) == nil {
+		t.Fatal("player should have velocity")
+	}
+
+	player.RemoveComponent(Velocity(0))
+	if player.Component(Velocity(0)) != nil {
+		t.Fatal("player should not have velocity")
+	}
+}
+
+func TestAddAndRemoveObjects(t *testing.T) {
+	world := ecs.NewWorld()
+
+	player := world.AddObject(ecs.NewObject())
+	if world.GetObject(player) == nil {
+		t.Fatal("player should exist")
+	}
+
+	world.RemoveObject(player)
+	if world.GetObject(player) != nil {
+		t.Fatal("player should not exist")
+	}
+}
+
+func TestSelfDestruct(t *testing.T) {
+	type Marked struct{}
+
+	// Systems can take a few special types, including *ecs.World and ecs.Entity,
+	// in order to modify the world.
+	selfDestruct := func(world *ecs.World, entity ecs.Entity, _ Marked) {
+		world.RemoveObject(entity)
+	}
+
+	world := ecs.NewWorld()
+	willDestruct := world.AddObject(ecs.NewObject(Marked{}))
+	willNotDestruct := world.AddObject(ecs.NewObject(Marked{}))
+	world.AddSystem(ecs.System{Func: selfDestruct})
+
+	world.Run()
+
+	if world.GetObject(willDestruct) != nil {
+		t.Error("expected object to self-destruct")
+	}
+	if world.GetObject(willNotDestruct) != nil {
+		t.Error("expected object not to self-destruct")
 	}
 }
